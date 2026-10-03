@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Cross-Platform Tetris</title>
+    <style>
+        :root {
+            --bg-color: #1a1a1a;
+            --panel-bg: #222;
+            --accent-color: #00ff00;
+        }
+        body {
+            background: var(--bg-color);
+            color: var(--accent-color);
+            font-family: sans-serif;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            touch-action: manipulation; /* 防止雙擊縮放 */
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        /* 頂部資訊欄 */
+        .header {
+            display: flex;
+            width: 100%;
+            max-width: 400px;
+            justify-content: space-around;
+            padding: 10px 0;
+            background: var(--panel-bg);
+        }
+        .info-item { text-align: center; }
+        .info-label { font-size: 10px; color: #888; }
+        .info-value { font-size: 18px; font-weight: bold; }
+
+        /* 遊戲主區域 */
+        .main-area {
+            display: flex;
+            flex-direction: row;
+            gap: 10px;
+            margin: 10px 0;
+        }
+        canvas#tetris {
+            border: 2px solid #444;
+            background: #000;
+            height: 60vh; /* 根據手機高度動態調整 */
+            width: auto;
+        }
+        .side-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        canvas#nextCanvas {
+            background: #111;
+            border: 1px solid #333;
+        }
+
+        /* 虛擬按鍵區 - 手機專用 */
+        .controls-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 70px);
+            grid-template-rows: repeat(2, 60px);
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .btn {
+            background: #333;
+            border: 1px solid #555;
+            border-radius: 8px;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .btn:active { background: #555; transform: scale(0.95); }
+        .btn-wide { grid-column: span 3; height: 40px; font-size: 14px; }
+
+        /* 隱藏電腦版提示 */
+        .hint { font-size: 10px; color: #555; }
+        
+        @media (min-width: 600px) {
+            .controls-grid { margin-top: 20px; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <div class="info-item">
+        <div class="info-label">SCORE</div>
+        <div id="score" class="info-value">0</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">SPEED</div>
+        <input type="range" id="speedRange" min="1" max="10" value="5" style="width:80px">
+    </div>
+    <div class="info-item">
+        <div class="info-label">NEXT</div>
+        <canvas id="nextCanvas" width="50" height="50"></canvas>
+    </div>
+</div>
+
+<div class="main-area">
+    <canvas id="tetris" width="240" height="480"></canvas>
+</div>
+
+<!-- 手機觸控按鈕 -->
+<div class="controls-grid">
+    <div class="btn" id="btnRotate">↻</div>
+    <div class="btn" id="btnUp">↑</div> <!-- 這裡向上設為旋轉或無功能，通常俄羅斯方塊向上是旋轉 -->
+    <div class="btn" id="btnDrop">⤓</div>
+    
+    <div class="btn" id="btnLeft">←</div>
+    <div class="btn" id="btnDown">↓</div>
+    <div class="btn" id="btnRight">→</div>
+    
+    <div class="btn btn-wide" id="btnSpace">HARD DROP (SPACE)</div>
+</div>
+
+<script>
+    const canvas = document.getElementById('tetris');
+    const context = canvas.getContext('2d');
+    const nextCanvas = document.getElementById('nextCanvas');
+    const nextContext = nextCanvas.getContext('2d');
+
+    context.scale(24, 24);
+    nextContext.scale(12, 12);
+
+    const SHAPES = {
+        'I': [[0, 1, 0, 0], [0, 1, 0, 0], [0, 1, 0, 0], [0, 1, 0, 0]],
+        'L': [[0, 2, 0], [0, 2, 0], [0, 2, 2]],
+        'J': [[0, 3, 0], [0, 3, 0], [3, 3, 0]],
+        'O': [[4, 4], [4, 4]],
+        'Z': [[5, 5, 0], [0, 5, 5], [0, 0, 0]],
+        'S': [[0, 6, 6], [6, 6, 0], [0, 0, 0]],
+        'T': [[0, 7, 0], [7, 7, 7], [0, 0, 0]]
+    };
+    const COLORS = [null, '#FF0D72', '#0DC2FF', '#0DFF72', '#F538FF', '#FF8E0D', '#FFE138', '#3877FF'];
+
+    let arena = createMatrix(10, 20);
+    let nextPieceMatrix = null;
+    const player = { pos: {x: 0, y: 0}, matrix: null, score: 0 };
+
+    // 速度控制
+    let dropCounter = 0;
+    let dropInterval = 500;
+    const speedRange = document.getElementById('speedRange');
+    function updateSpeed() { dropInterval = 1100 - (parseInt(speedRange.value) * 100); }
+    speedRange.addEventListener('input', updateSpeed);
+
+    function createMatrix(w, h) {
+        const matrix = [];
+        while (h--) matrix.push(new Array(w).fill(0));
+        return matrix;
+    }
+
+    function draw() {
+        context.fillStyle = '#000';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        drawMatrix(arena, {x: 0, y: 0}, context);
+        drawMatrix(player.matrix, player.pos, context);
+
+        nextContext.fillStyle = '#111';
+        nextContext.fillRect(0, 0, nextCanvas.width, nextCanvas.height);
+        drawMatrix(nextPieceMatrix, {x: 0.5, y: 0.5}, nextContext);
+    }
+
+    function drawMatrix(matrix, offset, ctx) {
+        if (!matrix) return;
+        matrix.forEach((row, y) => {
+            row.forEach((value, x) => {
+                if (value !== 0) {
+                    ctx.fillStyle = COLORS[value];
+                    ctx.fillRect(x + offset.x, y + offset.y, 1, 1);
+                    ctx.lineWidth = 0.05;
+                    ctx.strokeStyle = 'white';
+                    ctx.strokeRect(x + offset.x, y + offset.y, 1, 1);
+                }
+            });
+        });
+    }
+
+    function collide(arena, player) {
+        const [m, o] = [player.matrix, player.pos];
+        for (let y = 0; y < m.length; ++y) {
+            for (let x = 0; x < m[y].length; ++x) {
+                if (m[y][x] !== 0 && (arena[y + o.y] && arena[y + o.y][x + o.x]) !== 0) return true;
+            }
+        }
+        return false;
+    }
+
+    function merge(arena, player) {
+        player.matrix.forEach((row, y) => {
+            row.forEach((value, x) => {
+                if (value !== 0) arena[y + player.pos.y][x + player.pos.x] = value;
+            });
+        });
+    }
+
+    function rotate(matrix, dir) {
+        for (let y = 0; y < matrix.length; ++y) {
+            for (let x = 0; x < y; ++x) [matrix[x][y], matrix[y][x]] = [matrix[y][x], matrix[x][y]];
+        }
+        if (dir > 0) matrix.forEach(row => row.reverse()); else matrix.reverse();
+    }
+
+    function arenaSweep() {
+        let rowCount = 1;
+        outer: for (let y = arena.length - 1; y > 0; --y) {
+            for (let x = 0; x < arena[y].length; ++x) {
+                if (arena[y][x] === 0) continue outer;
+            }
+            const row = arena.splice(y, 1)[0].fill(0);
+            arena.unshift(row);
+            ++y;
+            player.score += rowCount * 10;
+            rowCount *= 2;
+        }
+        document.getElementById('score').innerText = player.score;
+    }
+
+    function playerDrop() {
+        player.pos.y++;
+        if (collide(arena, player)) {
+            player.pos.y--;
+            merge(arena, player);
+            playerReset();
+            arenaSweep();
+        }
+        dropCounter = 0;
+    }
+
+    function playerMove(dir) {
+        player.pos.x += dir;
+        if (collide(arena, player)) player.pos.x -= dir;
+    }
+
+    function playerRotate(dir) {
+        const pos = player.pos.x;
+        let offset = 1;
+        rotate(player.matrix, dir);
+        while (collide(arena, player)) {
+            player.pos.x += offset;
+            offset = -(offset + (offset > 0 ? 1 : -1));
+            if (offset > player.matrix[0].length) {
+                rotate(player.matrix, -dir);
+                player.pos.x = pos;
+                return;
+            }
+        }
+    }
+
+    function playerReset() {
+        const pieces = 'ILJOTSZ';
+        if (nextPieceMatrix === null) {
+            nextPieceMatrix = SHAPES[pieces[pieces.length * Math.random() | 0]];
+        }
+        player.matrix = nextPieceMatrix;
+        nextPieceMatrix = SHAPES[pieces[pieces.length * Math.random() | 0]];
+        player.pos.y = 0;
+        player.pos.x = (arena[0].length / 2 | 0) - (player.matrix[0].length / 2 | 0);
+        if (collide(arena, player)) {
+            arena.forEach(row => row.fill(0));
+            player.score = 0;
+            document.getElementById('score').innerText = 0;
+        }
+    }
+
+    // --- 事件綁定 (鍵盤 + 觸控) ---
+    const handleInput = (action) => {
+        if (action === 'left') playerMove(-1);
+        if (action === 'right') playerMove(1);
+        if (action === 'down') playerDrop();
+        if (action === 'rotate') playerRotate(1);
+        if (action === 'hard') {
+            while(!collide(arena, player)) player.pos.y++;
+            player.pos.y--;
+            merge(arena, player);
+            playerReset();
+            arenaSweep();
+        }
+    };
+
+    // 鍵盤
+    document.addEventListener('keydown', e => {
+        if (e.keyCode === 37) handleInput('left');
+        else if (e.keyCode === 39) handleInput('right');
+        else if (e.keyCode === 40) handleInput('down');
+        else if (e.keyCode === 38) handleInput('rotate');
+        else if (e.keyCode === 32) handleInput('hard');
+    });
+
+    // 觸控按鈕
+    const bindBtn = (id, action) => {
+        const el = document.getElementById(id);
+        // 使用 pointerdown 兼容性最好
+        el.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            handleInput(action);
+        });
+    };
+
+    bindBtn('btnLeft', 'left');
+    bindBtn('btnRight', 'right');
+    bindBtn('btnDown', 'down');
+    bindBtn('btnUp', 'rotate');
+    bindBtn('btnRotate', 'rotate');
+    bindBtn('btnSpace', 'hard');
+    bindBtn('btnDrop', 'down');
+
+    let lastTime = 0;
+    function update(time = 0) {
+        const deltaTime = time - lastTime;
+        lastTime = time;
+        dropCounter += deltaTime;
+        if (dropCounter > dropInterval) playerDrop();
+        draw();
+        requestAnimationFrame(update);
+    }
+
+    updateSpeed();
+    playerReset();
+    update();
+</script>
+</body>
+</html>
